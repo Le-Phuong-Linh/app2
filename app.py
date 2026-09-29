@@ -1,114 +1,107 @@
 import streamlit as st
 import os
-import sys
-import requests
 import re
-from bs4 import BeautifulSoup
-import time
-import random
 import shutil
 
-# --- HEADERS ---
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
-}
+def clean_content(text):
+    text = re.sub(r'^\s*第\d+页\s*', '', text)
+    footer_marker = "哦豁，小伙伴们如果觉得52书库不错"
+    if footer_marker in text:
+        text = text.split(footer_marker)[0]
+    return text.strip()
 
-def get_chapters_list(index_url, status_text):
-    """Получает список ссылок на все главы со страницы оглавления"""
-    try:
-        response = requests.get(index_url, headers=HEADERS, timeout=10)
-        response.encoding = 'utf-8'
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        links = []
-        for a in soup.find_all('a', href=True):
-            href = a['href']
-            if index_url.replace('.html', '') in href or (href.startswith('/') and href.endswith('.html') and '_' in href):
-                full_url = href if href.startswith('http') else f"https://www.52shuku.net{href}"
-                if full_url not in links and full_url != index_url:
-                    links.append((a.text.strip(), full_url))
-        
-        if not links:
-            main_content = soup.find('article') or soup.find('div', class_='content')
-            if main_content:
-                for a in main_content.find_all('a', href=True):
-                    full_url = a['href'] if a['href'].startswith('http') else f"https://www.52shuku.net{a['href']}"
-                    links.append((a.text.strip(), full_url))
-                    
-        return links
-    except Exception as e:
-        status_text.error(f"Ошибка при получении оглавления: {e}")
-        return []
-
-def download_and_split(index_url, output_dir, status_container):
-    status_container.write("Сканирую страницу книги...")
-    chapters = get_chapters_list(index_url, status_container)
+def process_books(status_container):
+    base_dir = os.getcwd()
+    input_dir = os.path.join(base_dir, "input")
+    output_dir = os.path.join(base_dir, "Output_Chapters")
     
-    if not chapters:
-        status_container.error("Не удалось найти ссылки на главы. Проверьте правильность URL.")
+    if not os.path.exists(input_dir):
+        status_container.error(f"Error: Could not find the folder named 'input' at: {input_dir}")
         return False
 
-    status_container.write(f"Найдено страниц/глав для скачивания: {len(chapters)}")
-    
     os.makedirs(output_dir, exist_ok=True)
-
-    progress_bar = st.progress(0)
-    total_chapters = len(chapters)
-
-    for idx, (title, url) in enumerate(chapters, 1):
-        status_container.text(f"Скачиваю [{idx}/{total_chapters}]: {title}...")
+    
+    all_files = [f for f in os.listdir(input_dir) if f.endswith('.txt') and '_' in f]
+    
+    if not all_files:
+        status_container.error("No valid .txt files found inside the 'input' folder.")
+        return False
         
+    def get_file_num(filename):
         try:
-            res = requests.get(url, headers=HEADERS, timeout=10)
-            res.encoding = 'utf-8'
-            soup = BeautifulSoup(res.text, 'html.parser')
+            return int(filename.split('_')[0])
+        except ValueError:
+            return float('inf')
             
-            content_div = soup.find('article') or soup.find('div', class_='content') or soup.find('div', id='content')
-            
-            if content_div:
-                for s in content_div(['script', 'style', 'a']):
-                    s.decompose()
-                
-                text = content_div.get_text(separator="\n").strip()
-                full_chapter_text = f"{title}\n\n{text}"
-                
-                safe_title = re.sub(r'[\\/*?:"<>|]', "", title)[:40]
-                file_name = f"{idx:03d}_{safe_title}.txt"
-                file_out_path = os.path.join(output_dir, file_name)
-                
-                with open(file_out_path, 'w', encoding='utf-8') as out_f:
-                    out_f.write(full_chapter_text)
-            
-            progress_bar.progress(idx / total_chapters)
-            time.sleep(random.uniform(0.5, 1.0))
-            
+    all_files.sort(key=get_file_num)
+    status_container.write(f"Found {len(all_files)} files in 'input' to process...")
+    
+    combined_text = []
+    for filename in all_files:
+        file_path = os.path.join(input_dir, filename)
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+                cleaned = clean_content(content)
+                if cleaned:
+                    combined_text.append(cleaned)
         except Exception as e:
             continue
 
-    status_container.success("Все готово! Главы сохранены.")
+    full_novel = "\n\n".join(combined_text)
+    chapter_regex = r'(第[0-9一二三四五六七八九十百千万]+章[^\n]*)'
+    parts = re.split(chapter_regex, full_novel)
+    
+    prologue = parts[0].strip()
+    if prologue:
+        with open(os.path.join(output_dir, "0000_前言.txt"), 'w', encoding='utf-8') as f:
+            f.write(prologue)
+            
+    chapter_count = 0
+    for i in range(1, len(parts), 2):
+        chap_title = parts[i].strip()
+        chap_content = parts[i+1].strip()
+        
+        safe_title = re.sub(r'[\\/*?:"<>|]', "", chap_title)[:50]
+        clean_filename_title = re.sub(r'^第[0-9一二三四五六七八九十百千万]+章\s*', '', safe_title)
+        
+        if not clean_filename_title.strip():
+            clean_filename_title = safe_title
+            
+        filename = f"{str(chapter_count+1).zfill(4)}_{clean_filename_title}.txt"
+        output_path = os.path.join(output_dir, filename)
+        
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(chap_title + "\n\n" + chap_content)
+            
+        chapter_count += 1
+
+    status_container.success(f"Success! Cleaned and generated {chapter_count} real chapters inside 'Output_Chapters'.")
     return True
 
 # --- STREAMLIT UI ---
-st.title("📥 Shuku Book Downloader")
-st.write("Enter a 52shuku book index URL to download all chapters into an `input/` folder.")
+st.title("✂️ Shuku Chapter Splitter")
+st.write("Upload your raw chapter text files below to clean them and split them into real, structured chapters.")
 
-url_input = st.text_input("52shuku Index URL", "https://www.52shuku.net/yanqing/h1fY.html")
+uploaded_files = st.file_uploader("Upload raw chapter .txt files", accept_multiple_files=True, type=["txt"])
 
-if st.button("Start Download"):
-    output_folder = "input"
+if uploaded_files:
+    os.makedirs("input", exist_ok=True)
+    for uploaded_file in uploaded_files:
+        with open(os.path.join("input", uploaded_file.name), "wb") as f:
+            f.write(uploaded_file.getbuffer())
+    st.success(f"Successfully loaded {len(uploaded_files)} files ready for processing!")
+
+if st.button("Start Splitting Chapters"):
     status_box = st.empty()
-    
-    success = download_and_split(url_input, output_folder, status_box)
+    success = process_books(status_box)
     
     if success:
-        shutil.make_archive("downloaded_chapters", 'zip', output_folder)
-        
-        with open("downloaded_chapters.zip", "rb") as fp:
+        shutil.make_archive("real_chapters_output", 'zip', "Output_Chapters")
+        with open("real_chapters_output.zip", "rb") as fp:
             st.download_button(
-                label="📦 Download Chapters ZIP",
+                label="📦 Download Real Chapters ZIP",
                 data=fp,
-                file_name="chapters.zip",
+                file_name="real_chapters.zip",
                 mime="application/zip"
             )
